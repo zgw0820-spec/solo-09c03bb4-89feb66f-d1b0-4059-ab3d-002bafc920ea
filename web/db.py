@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS events (
     claimed_at      TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
+    gateway_no      TEXT,
+    is_handover     INTEGER NOT NULL DEFAULT 0,
     UNIQUE (device_id, seq)
 );
 
@@ -69,6 +71,24 @@ CREATE TABLE IF NOT EXISTS status_log (
 );
 """
 
+# Post-baseline column migrations for pre-existing SQLite volumes.
+_ADDED_COLUMNS = {
+    "events": [
+        ("gateway_no", "TEXT"),
+        ("is_handover", "INTEGER NOT NULL DEFAULT 0"),
+    ],
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {r["name"] for r in conn.execute(
+            f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in existing:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
 
 def utcnow() -> str:
     # Microsecond precision keeps sub-second backoff comparisons correct.
@@ -90,6 +110,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 def init_db(db_path: str | Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 def with_write_retry(fn: Callable[[], T],

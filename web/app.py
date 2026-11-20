@@ -58,6 +58,24 @@ def create_app(
 
             def _submit() -> dict[str, Any]:
                 with dbmod.transaction(conn):
+                    # 每台设备仅允许接替一次：网页侧前置校验，接收端仍会
+                    # 权威兜底（HANDOVER_LIMIT）。
+                    if event_in.is_handover:
+                        if not event_in.gateway_no:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="接替首报必须填写新网关编号")
+                        handover_row = conn.execute(
+                            "SELECT 1 FROM events WHERE device_id = ? "
+                            "AND is_handover = 1 LIMIT 1",
+                            (event_in.device_id,),
+                        ).fetchone()
+                        if handover_row is not None:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="该设备已发起过网关接替，"
+                                       "每台设备仅允许换新一次")
+
                     # Per-device monotonic seq.  The UNIQUE(device_id, seq)
                     # constraint plus this transaction make concurrent submits
                     # safe.
@@ -77,25 +95,35 @@ def create_app(
                         "description": event_in.description,
                         "is_replay": False,
                         "occurred_at": now,
+                        "gateway_no": event_in.gateway_no,
+                        "is_handover": event_in.is_handover,
                     }
                     cur = conn.execute(
                         """INSERT INTO events
                                (event_key, device_id, seq, event_type, payload,
                                 status, attempts, next_attempt_at,
-                                created_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)""",
+                                created_at, updated_at, gateway_no, is_handover)
+                           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?)""",
                         (
                             event_key, event_in.device_id, seq,
                             event_in.event_type,
                             json.dumps(payload, ensure_ascii=False),
                             now, now, now,
+                            event_in.gateway_no,
+                            1 if event_in.is_handover else 0,
                         ),
                     )
                     event_id = cur.lastrowid
+                    detail = "事件已提交，等待工作器投递"
+                    if event_in.is_handover:
+                        detail = (f"网关接替首报已提交（新网关 "
+                                  f"{event_in.gateway_no}），走现有队列投递")
                     dbmod.log_status(conn, event_id, event_key, None,
-                                     "pending", "事件已提交，等待工作器投递")
+                                     "pending", detail)
                     return {"event_key": event_key, "seq": seq,
-                            "status": "pending"}
+                            "status": "pending",
+                            "is_handover": event_in.is_handover,
+                            "gateway_no": event_in.gateway_no}
 
             return dbmod.with_write_retry(_submit)
         finally:
@@ -234,6 +262,14 @@ def create_app(
     @app.get("/api/receiver/device-state")
     def proxy_device_state() -> JSONResponse:
         return _proxy("/api/device-state")
+
+    @app.get("/api/receiver/gateways")
+    def proxy_gateways() -> JSONResponse:
+        return _proxy("/api/gateways")
+
+    @app.get("/api/receiver/gateway-audit")
+    def proxy_gateway_audit() -> JSONResponse:
+        return _proxy("/api/gateway-audit")
 
     @app.get("/health")
     def health() -> dict[str, str]:

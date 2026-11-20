@@ -6,6 +6,9 @@ Delivery state machine for each event row:
                            -> rejected (explicit 4xx, e.g. missing team_no)
                                   -> 2nd explicit rejection -> quarantined
                                   -> otherwise back to pending with backoff
+                           -> suppressed (terminal gateway 4xx, e.g. an old-
+                                  gateway report after the handover switch;
+                                  receiver keeps the audit trail, delivery ends)
                            -> pending (network/5xx failure, backoff; other
                                        eligible events keep being processed)
 
@@ -55,6 +58,16 @@ def _txn(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
 # Explicit receiver rejection reason codes that count toward quarantine.
 EXPLICIT_REJECT_CODES = {"MISSING_TEAM_NO"}
+# Terminal gateway rejections: the message has been audited at the receiver
+# and delivery must end (no retry, no quarantine). Covers ordinary reports
+# arriving from a non-current gateway — including messages already queued or
+# replayed out of quarantine — and rejected second handover attempts.
+GATEWAY_TERMINAL_CODES = {
+    "GATEWAY_NOT_CURRENT",
+    "HANDOVER_LIMIT",
+    "HANDOVER_GATEWAY_REQUIRED",
+    "HANDOVER_SAME_GATEWAY",
+}
 MAX_EXPLICIT_REJECTS = 2
 MAX_BACKOFF_SECONDS = 30.0
 STALE_PROCESSING_SECONDS = 60
@@ -271,6 +284,27 @@ class Worker:
                 if isinstance(detail, dict):
                     reason_code = str(detail.get("reason_code", ""))
                     reason_text = str(detail.get("reason", reason_text))
+
+                if reason_code in GATEWAY_TERMINAL_CODES:
+                    # 网关规则终端拒收：接收端已留痕（gateway_audit +
+                    # reject_records）。消息在此结束投递，保留全部记录。
+                    conn.execute(
+                        """UPDATE events
+                           SET status = 'suppressed', attempts = ?,
+                               last_error = ?, last_response = ?,
+                               next_attempt_at = NULL, claimed_at = NULL,
+                               updated_at = ?
+                         WHERE id = ?""",
+                        (attempts, reason_text,
+                         json.dumps(body, ensure_ascii=False),
+                         now, row["id"]),
+                    )
+                    dbmod.log_status(
+                        conn, row["id"], row["event_key"], "processing",
+                        "suppressed",
+                        f"网关规则终端拒收（{reason_code}）：{reason_text}；"
+                        "已留痕并结束投递")
+                    return "suppressed"
 
                 if reason_code in EXPLICIT_REJECT_CODES:
                     # Two explicit rejections -> quarantine (permanent).

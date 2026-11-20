@@ -8,7 +8,7 @@
   :root {
     --bg: #f4f6f8; --card: #fff; --line: #d9dee4; --text: #1f2933;
     --muted: #66707a; --blue: #1d4ed8; --red: #b91c1c; --green: #15803d;
-    --amber: #b45309; --grey: #475569;
+    --amber: #b45309; --grey: #475569; --teal: #0f766e;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
@@ -17,8 +17,8 @@
            display: flex; align-items: center; gap: 16px; }
   header h1 { font-size: 18px; margin: 0; }
   header .auto { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 13px; }
-  main { max-width: 1180px; margin: 20px auto; padding: 0 16px; display: grid;
-         grid-template-columns: 340px 1fr; gap: 16px; }
+  main { max-width: 1240px; margin: 20px auto; padding: 0 16px; display: grid;
+         grid-template-columns: 360px 1fr; gap: 16px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
           padding: 16px; margin-bottom: 16px; }
   .card h2 { font-size: 15px; margin: 0 0 12px; padding-bottom: 8px;
@@ -26,6 +26,7 @@
   label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
   input, select, textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line);
           border-radius: 6px; font-size: 14px; font-family: inherit; }
+  input[type=checkbox] { width: auto; }
   button { background: var(--blue); color: #fff; border: 0; border-radius: 6px;
            padding: 9px 16px; font-size: 14px; cursor: pointer; margin-top: 14px; }
   button:hover { filter: brightness(1.1); }
@@ -45,6 +46,9 @@
   .b-rejected { background: var(--amber); }
   .b-quarantined { background: var(--red); }
   .b-accepted { background: var(--green); }
+  .b-suppressed { background: var(--teal); }
+  .b-handover { background: var(--blue); }
+  .b-register { background: var(--grey); }
   .muted { color: var(--muted); font-size: 12px; }
   .msg { margin-top: 10px; padding: 8px 10px; border-radius: 6px; font-size: 13px;
          display: none; white-space: pre-wrap; }
@@ -53,22 +57,27 @@
   .replay-row { display: flex; gap: 6px; }
   .replay-row input { padding: 5px 7px; font-size: 12px; }
   .replay-row button { margin: 0; padding: 5px 10px; font-size: 12px; }
-  .scroll { max-height: 520px; overflow: auto; }
+  .scroll { max-height: 560px; overflow: auto; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
   code { background: #eef2f7; padding: 1px 5px; border-radius: 4px; }
+  .checkline { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .checkline label { margin: 0; font-size: 13px; color: var(--text); }
+  .handover-box { border: 1px dashed var(--blue); border-radius: 8px;
+                  padding: 4px 12px 10px; margin-top: 12px; background: #f8faff; }
+  .handover-box h3 { font-size: 13px; margin: 10px 0 0; color: var(--blue); }
 </style>
 </head>
 <body>
 <header>
   <h1>检修事件投递操作台</h1>
-  <span class="muted" style="color:#94a3b8">故障/恢复事件 · 队列投递 · 隔离重放 · 接收端派单</span>
+  <span class="muted" style="color:#94a3b8">故障/恢复事件 · 队列投递 · 网关接替 · 隔离重放 · 接收端派单</span>
   <label class="auto"><input type="checkbox" id="autoRefresh" checked /> 3 秒自动刷新</label>
 </header>
 
 <main>
   <div>
     <div class="card">
-      <h2>提交事件（按设备号递增序号）</h2>
+      <h2>提交上报（按设备号递增序号）</h2>
       <label>设备号 *</label>
       <input id="deviceId" placeholder="例如 DEV-1001" />
       <label>事件类型 *</label>
@@ -78,9 +87,23 @@
       </select>
       <label>班组号（故障缺失将被接收端拒收）</label>
       <input id="teamNo" placeholder="例如 TEAM-A7" />
+      <label>采集网关编号（未注明的上报归原网关）</label>
+      <input id="gatewayNo" placeholder="例如 GW-NEW-02，留空则归原网关" />
       <label>描述</label>
       <textarea id="description" rows="2"></textarea>
-      <button onclick="submitEvent()">提交事件</button>
+      <div class="handover-box">
+        <div class="checkline">
+          <input type="checkbox" id="isHandover" />
+          <label for="isHandover">以此条上报发起<strong>网关接替首报</strong>（每台设备限一次）</label>
+        </div>
+        <h3>接替规则提示</h3>
+        <div class="hint">
+          勾选后必须填写新网关编号；首报走现有队列，接收端受理时在同一事务内
+          派单、切换当前网关并按首报更新设备状态（即使原网关已有更大序号工单）。
+          首报受理前原网关照常派单；切换后旧网关的未派单消息将留痕并结束投递。
+        </div>
+      </div>
+      <button onclick="submitEvent()">提交上报</button>
       <div id="submitMsg" class="msg"></div>
       <div class="hint">同一设备每次提交自动分配递增序号 <code>seq</code>，
         事件唯一键为 <code>设备号:序号</code>。</div>
@@ -97,6 +120,8 @@
     <div class="card">
       <div class="tabs">
         <button class="active" data-tab="events" onclick="switchTab('events')">事件队列</button>
+        <button data-tab="gateways" onclick="switchTab('gateways')">网关接替</button>
+        <button data-tab="gwaudit" onclick="switchTab('gwaudit')">网关留痕</button>
         <button data-tab="quarantine" onclick="switchTab('quarantine')">隔离消息 / 重放</button>
         <button data-tab="workorders" onclick="switchTab('workorders')">接收端派单</button>
         <button data-tab="devstate" onclick="switchTab('devstate')">设备最新状态</button>
@@ -105,6 +130,12 @@
 
       <div id="tab-events">
         <div class="scroll"><table id="eventsTable"></table></div>
+      </div>
+      <div id="tab-gateways" style="display:none">
+        <div class="scroll"><table id="gatewaysTable"></table></div>
+      </div>
+      <div id="tab-gwaudit" style="display:none">
+        <div class="scroll"><table id="gwAuditTable"></table></div>
       </div>
       <div id="tab-quarantine" style="display:none">
         <div class="scroll"><table id="quarantineTable"></table></div>
@@ -152,17 +183,24 @@ async function submitEvent() {
     event_type: $("eventType").value,
     team_no: $("teamNo").value.trim() || null,
     description: $("description").value.trim() || null,
+    gateway_no: $("gatewayNo").value.trim() || null,
+    is_handover: $("isHandover").checked,
   };
   if (!body.device_id) {
     showMsg($("submitMsg"), false, "请填写设备号"); return;
+  }
+  if (body.is_handover && !body.gateway_no) {
+    showMsg($("submitMsg"), false, "接替首报必须填写新网关编号"); return;
   }
   try {
     const data = await api("/api/events", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify(body),
     });
-    showMsg($("submitMsg"), true,
-      `已提交：${data.event_key}（seq=${data.seq}），等待工作器投递`);
+    const tip = data.is_handover
+      ? `接替首报已提交：${data.event_key}（新网关 ${data.gateway_no}），走现有队列`
+      : `已提交：${data.event_key}（seq=${data.seq}），等待工作器投递`;
+    showMsg($("submitMsg"), true, tip);
     $("description").value = "";
     refreshAll();
   } catch (e) {
@@ -173,7 +211,8 @@ async function submitEvent() {
 function switchTab(tab) {
   document.querySelectorAll(".tabs button").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === tab));
-  ["events", "quarantine", "workorders", "devstate", "log"].forEach((t) =>
+  ["events", "gateways", "gwaudit", "quarantine", "workorders",
+   "devstate", "log"].forEach((t) =>
     $(`tab-${t}`).style.display = t === tab ? "" : "none");
 }
 
@@ -208,15 +247,50 @@ function table(el, headers, rows) {
 async function loadEvents() {
   const data = await api("/api/events");
   table($("eventsTable"),
-    ["事件键", "设备", "序号", "类型", "状态", "尝试次数", "班组号",
-     "最近错误", "接收端响应", "下次尝试", "更新时间"],
+    ["事件键", "设备", "序号", "类型", "状态", "尝试次数", "网关", "接替",
+     "班组号", "最近错误", "接收端响应", "下次尝试", "更新时间"],
     data.events.map((e) => [
       esc(e.event_key), esc(e.device_id), e.seq, esc(e.event_type),
       badge(e.status), e.attempts,
+      esc(e.payload?.gateway_no || "—"),
+      e.payload?.is_handover ? badge("handover") + " 首报" : "—",
       esc(e.payload?.team_no || "—"),
       esc(e.last_error || "—"),
       `<code>${esc(e.last_response ? JSON.stringify(e.last_response) : "—")}</code>`,
       esc(e.next_attempt_at || "—"), esc(e.updated_at),
+    ]));
+}
+
+async function loadGateways() {
+  const data = await api("/api/receiver/gateways");
+  table($("gatewaysTable"),
+    ["设备", "原网关", "当前网关", "接替次数", "接替首报", "接替时间", "更新时间"],
+    (data.gateways || []).map((g) => [
+      esc(g.device_id),
+      esc(g.original_gateway || "（未注明）"),
+      esc(g.current_gateway),
+      g.handover_count,
+      g.handover_event_key
+        ? badge("handover") + " " + esc(g.handover_event_key) : "—",
+      esc(g.handover_at || "—"),
+      esc(g.updated_at),
+    ]));
+}
+
+async function loadGwAudit() {
+  const data = await api("/api/receiver/gateway-audit");
+  table($("gwAuditTable"),
+    ["时间", "事件键", "设备", "序号", "上报网关", "归属网关", "动作",
+     "原因码", "说明"],
+    (data.gateway_audit || []).map((a) => [
+      esc(a.created_at), esc(a.event_key), esc(a.device_id), a.seq,
+      esc(a.gateway_no || "（未注明）"),
+      esc(a.effective_gateway || "（未注明）"),
+      a.action === "handover" ? badge("handover") + " 接替"
+        : a.action === "suppressed" ? badge("suppressed") + " 拦截"
+        : badge("register") + " 登记",
+      esc(a.reason_code || "—"),
+      esc(a.reason || ""),
     ]));
 }
 
@@ -244,10 +318,13 @@ async function loadWorkOrders() {
   const rows = (data.work_orders || []).map((w) => [
     esc(w.work_order_no), esc(w.event_key), esc(w.device_id), w.seq,
     esc(w.event_type), esc(w.team_no || "—"),
+    esc(w.gateway_no || "—"),
+    w.is_handover ? badge("handover") + " 接替" : "—",
     w.is_replay ? "是（重放）" : "否", esc(w.received_at),
   ]);
   table($("workOrdersTable"),
-    ["工单号", "事件键", "设备", "序号", "类型", "班组号", "重放", "接收时间"], rows);
+    ["工单号", "事件键", "设备", "序号", "类型", "班组号", "网关",
+     "接替", "重放", "接收时间"], rows);
 }
 
 async function loadDeviceState() {
@@ -271,8 +348,8 @@ async function loadLog() {
 }
 
 async function refreshAll() {
-  const tasks = [loadEvents, loadQuarantine, loadWorkOrders,
-                 loadDeviceState, loadLog];
+  const tasks = [loadEvents, loadGateways, loadGwAudit, loadQuarantine,
+                 loadWorkOrders, loadDeviceState, loadLog];
   await Promise.all(tasks.map((fn) =>
     fn().catch((e) => console.error(fn.name, e))));
 }

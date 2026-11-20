@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS dispatch_records (
     payload_json  TEXT NOT NULL,
     work_order_no TEXT NOT NULL,
     is_replay     INTEGER NOT NULL DEFAULT 0,
-    received_at   TEXT NOT NULL
+    received_at   TEXT NOT NULL,
+    gateway_no    TEXT,
+    is_handover   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_dispatch_device
@@ -53,7 +55,56 @@ CREATE TABLE IF NOT EXISTS reject_records (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reject_event ON reject_records (event_key);
+
+-- 当前采集网关归属（接收端是网关接替的权威记录方）。
+-- original/current gateway 均允许为空：设备的消息从未注明网关时，
+-- 归属按 NULL（未注明）处理；首条消息即接替首报时原网关无从得知。
+CREATE TABLE IF NOT EXISTS device_gateways (
+    device_id          TEXT PRIMARY KEY,
+    original_gateway   TEXT,
+    current_gateway    TEXT,
+    handover_count     INTEGER NOT NULL DEFAULT 0,
+    handover_event_key TEXT,
+    handover_at        TEXT,
+    updated_at         TEXT NOT NULL
+);
+
+-- 网关接替与旧网关消息拦截的全过程留痕（注册/接替/抑制/拒收）。
+CREATE TABLE IF NOT EXISTS gateway_audit (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key         TEXT NOT NULL,
+    device_id         TEXT NOT NULL,
+    seq               INTEGER NOT NULL,
+    gateway_no        TEXT,
+    effective_gateway TEXT,
+    action            TEXT NOT NULL,
+    reason_code       TEXT,
+    reason            TEXT,
+    created_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gwaudit_device
+    ON gateway_audit (device_id, id);
 """
+
+# Columns added after the baseline release; SQLite has no "ADD COLUMN IF NOT
+# EXISTS", so PRAGMA-table_info guards each migration on pre-existing volumes.
+_ADDED_COLUMNS = {
+    "dispatch_records": [
+        ("gateway_no", "TEXT"),
+        ("is_handover", "INTEGER NOT NULL DEFAULT 0"),
+    ],
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {r["name"] for r in conn.execute(
+            f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in existing:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def utcnow() -> str:
@@ -75,6 +126,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 def init_db(db_path: str | Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 def with_write_retry(fn: Callable[[], T],

@@ -161,6 +161,114 @@ def main() -> int:
         assert page.status_code == 200 and "检修事件投递操作台" in page.text
         print("[8] 操作网页静态页面可访问")
 
+        # 7. gateway handover over real HTTP: switch + late old-gateway report
+        print("\n--- 网关接替场景 ---")
+        # 7.1 device reports via original gateway GW-OLD
+        r = webc.post("/api/events", json={
+            "device_id": "GW-DEV-1", "event_type": "fault",
+            "team_no": "TEAM-G", "gateway_no": "GW-OLD"})
+        r.raise_for_status()
+        old_key = r.json()["event_key"]
+        # 7.2 handover first report on new gateway GW-NEW (a recovery)
+        r = webc.post("/api/events", json={
+            "device_id": "GW-DEV-1", "event_type": "recovery",
+            "team_no": "TEAM-G", "gateway_no": "GW-NEW",
+            "is_handover": True})
+        r.raise_for_status()
+        handover_key = r.json()["event_key"]
+        # 7.3 an old-gateway message already queued after the switch
+        r = webc.post("/api/events", json={
+            "device_id": "GW-DEV-1", "event_type": "fault",
+            "team_no": "TEAM-G", "gateway_no": "GW-OLD"})
+        r.raise_for_status()
+        late_key = r.json()["event_key"]
+        # 7.4 an unmarked report -> attributed to original gateway -> suppressed
+        r = webc.post("/api/events", json={
+            "device_id": "GW-DEV-1", "event_type": "fault",
+            "team_no": "TEAM-G"})
+        r.raise_for_status()
+        unmarked_key = r.json()["event_key"]
+        # 7.5 a current-gateway report -> accepted
+        r = webc.post("/api/events", json={
+            "device_id": "GW-DEV-1", "event_type": "fault",
+            "team_no": "TEAM-G", "gateway_no": "GW-NEW"})
+        r.raise_for_status()
+        new_key = r.json()["event_key"]
+
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            final = {e["event_key"]: e["status"]
+                     for e in webc.get("/api/events").json()["events"]}
+            if final.get(handover_key) == "accepted" \
+                    and final.get(late_key) == "suppressed" \
+                    and final.get(unmarked_key) == "suppressed" \
+                    and final.get(new_key) == "accepted":
+                break
+            time.sleep(0.4)
+        assert final.get(handover_key) == "accepted", final
+        assert final.get(late_key) == "suppressed", final
+        assert final.get(unmarked_key) == "suppressed", final
+        assert final.get(new_key) == "accepted", final
+        print("[9] 接替首报受理、旧网关迟到消息与未注明消息被抑制、"
+              "新网关消息派单:",
+              {k: final[k] for k in (handover_key, late_key,
+                                     unmarked_key, new_key)})
+
+        gateways = httpx.get(
+            "http://127.0.0.1:8101/api/gateways", timeout=10).json()["gateways"]
+        g = next(x for x in gateways if x["device_id"] == "GW-DEV-1")
+        assert g["original_gateway"] == "GW-OLD"
+        assert g["current_gateway"] == "GW-NEW"
+        assert g["handover_count"] == 1
+        assert g["handover_event_key"] == handover_key
+        print("[10] 接收端当前网关已切换，原网关保留:", g)
+
+        audit = httpx.get(
+            "http://127.0.0.1:8101/api/gateway-audit",
+            timeout=10).json()["gateway_audit"]
+        actions = {(a["event_key"], a["action"]) for a in audit}
+        assert (handover_key, "handover") in actions
+        assert (late_key, "suppressed") in actions
+        assert (unmarked_key, "suppressed") in actions
+        print("[11] 网关留痕完整：登记/接替/抑制动作均在案")
+
+        orders = httpx.get(
+            "http://127.0.0.1:8101/api/work-orders", timeout=10).json()
+        order_keys = [o["event_key"] for o in orders["work_orders"]]
+        assert handover_key in order_keys and late_key not in order_keys
+        assert unmarked_key not in order_keys
+        assert sum(1 for k in order_keys if k == handover_key) == 1
+        print("[12] 接替首报恰有一张工单，被抑制消息无工单")
+
+        # 7.6 second handover is refused
+        r = webc.post("/api/events", json={
+            "device_id": "GW-DEV-1", "event_type": "fault",
+            "team_no": "TEAM-G", "gateway_no": "GW-THIRD",
+            "is_handover": True})
+        assert r.status_code == 409, r.status_code
+        print("[13] 同一设备二次接替被网页拒绝（409）")
+
+        # 7.7 receiver restart: gateway state and audit remain queryable
+        receiver.send_signal(signal.SIGTERM)
+        receiver.wait(timeout=10)
+        procs.remove(receiver)
+        receiver2 = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "receiver.app:app",
+             "--host", "127.0.0.1", "--port", "8101"],
+            cwd=ROOT, env={**ENV, "RECEIVER_DB": str(RECV_DB)},
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        procs.append(receiver2)
+        wait_health("http://127.0.0.1:8101/health")
+        gateways2 = httpx.get(
+            "http://127.0.0.1:8101/api/gateways", timeout=10).json()["gateways"]
+        g2 = next(x for x in gateways2 if x["device_id"] == "GW-DEV-1")
+        assert g2["current_gateway"] == "GW-NEW" and g2["handover_count"] == 1
+        audit2 = httpx.get(
+            "http://127.0.0.1:8101/api/gateway-audit",
+            timeout=10).json()["gateway_audit"]
+        assert len(audit2) == len(audit)
+        print("[14] 接收端重启后网关归属与接替留痕仍可查实")
+
         print("\nHTTP 端到端集成测试全部通过。")
         return 0
     finally:
