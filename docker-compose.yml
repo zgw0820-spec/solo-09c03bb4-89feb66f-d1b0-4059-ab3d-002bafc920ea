@@ -1,0 +1,58 @@
+services:
+  # 检修接收端：校验班组号、幂等派单、留存处理记录
+  receiver:
+    build: .
+    command: uvicorn receiver.app:app --host 0.0.0.0 --port 8000
+    environment:
+      RECEIVER_DB: /data/receiver.db
+    volumes:
+      - receiver-data:/data
+    ports:
+      - "8001:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # 操作网页：提交事件、查看状态、隔离消息与重放
+  web:
+    build: .
+    command: uvicorn web.app:app --host 0.0.0.0 --port 8000
+    environment:
+      WEB_DB: /data/web.db
+      RECEIVER_URL: http://receiver:8000
+    volumes:
+      # web 与 worker 共享同一个 SQLite（WAL 多进程读写）
+      web-data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      receiver:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # 消费工作器：轮询共享 SQLite，向接收端投递
+  worker:
+    build: .
+    command: python -m worker.worker
+    environment:
+      WEB_DB: /data/web.db
+      RECEIVER_URL: http://receiver:8000
+      WORKER_POLL_INTERVAL: "1"
+    volumes:
+      - web-data:/data
+    depends_on:
+      receiver:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  receiver-data:
+  web-data:
